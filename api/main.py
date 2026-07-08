@@ -1,6 +1,7 @@
 import os
 from flask import Flask, send_from_directory
 
+# Vercelが自動認識できるように、オブジェクト名を「app」にします
 app = Flask(__name__)
 
 # ルート（/）にアクセスしたとき
