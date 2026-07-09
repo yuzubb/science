@@ -55,7 +55,7 @@
 </head>
 <body>
     <div id="whiteout"></div>
-    <button class="toggle-btn" id="toggleBtn" onclick="togglePanel()">≡</button>
+    <button class="toggle-btn hidden" id="toggleBtn" onclick="togglePanel()">≡</button>
     
     <div class="panel" id="panel">
         <div class="title">中性子星衝突シミュレータ</div>
@@ -101,8 +101,10 @@
         
         <div style="font-size: 11px; color: #888; line-height: 1.6;">
             <strong style="color: #00ff88;">操作方法:</strong><br>
-            PC: マウスホイール<br>
-            スマホ: 2本指ピンチ
+            ドラッグ: 回転<br>
+            右ドラッグ / Shift+ドラッグ: 移動<br>
+            ホイール: ズーム<br>
+            スマホ: 1本指で回転・2本指でズーム/移動
         </div>
     </div>
 
@@ -138,6 +140,14 @@
         let infallData = null;
         let autoCam = true;
         let starDist = 999;
+        // 手動カメラ：軌道角＋パン移動（目標値へ滑らかに追従）
+        let camYaw = 0, camPitch = 0.5;
+        let tgtYaw = 0, tgtPitch = 0.5, tgtDist = 120;
+        let panOffset = new THREE.Vector3(0, 0, 0);
+        let tgtPan = new THREE.Vector3(0, 0, 0);
+        let dragMode = null;   // 'orbit' | 'pan'
+        let lastPX = 0, lastPY = 0;
+        let touchMode = null, lastTouchMid = null;
         const RIN_W  = 2.6 * BH_SCALE;   // 円盤内縁（世界座標）
         const ROUT_W = 14.0 * BH_SCALE;  // 円盤外縁（世界座標）
 
@@ -184,23 +194,53 @@
 
             createStarfield();
             createNeutronStars();
+            createInspiralRings();
             createLensScene();
 
             window.addEventListener('resize', onWindowResize);
             
             window.addEventListener('wheel', (e) => {
                 e.preventDefault();
-                autoCam = false;
-                document.getElementById('autoCamLabel').textContent = 'OFF';
-                cameraDistance += e.deltaY > 0 ? cameraDistance * 0.08 : -cameraDistance * 0.08;
-                cameraDistance = Math.max(bhFormed ? 190 : 30, Math.min(900, cameraDistance));
+                goManual();
+                tgtDist += e.deltaY > 0 ? tgtDist * 0.10 : -tgtDist * 0.10;
+                tgtDist = Math.max(bhFormed ? 190 : 30, Math.min(900, tgtDist));
             }, { passive: false });
+
+            // マウスドラッグ：左=軌道回転、右/Shift=パン移動
+            renderer.domElement.addEventListener('pointerdown', (e) => {
+                goManual();
+                dragMode = (e.button === 2 || e.shiftKey) ? 'pan' : 'orbit';
+                lastPX = e.clientX; lastPY = e.clientY;
+            });
+            window.addEventListener('pointerup', () => dragMode = null);
+            window.addEventListener('pointermove', (e) => {
+                if (!dragMode) return;
+                const dx = e.clientX - lastPX, dy = e.clientY - lastPY;
+                lastPX = e.clientX; lastPY = e.clientY;
+                if (dragMode === 'orbit') {
+                    tgtYaw -= dx * 0.005;
+                    tgtPitch = Math.max(-1.4, Math.min(1.4, tgtPitch - dy * 0.005));
+                } else {
+                    const right = new THREE.Vector3().setFromMatrixColumn(camera.matrix, 0);
+                    const up = new THREE.Vector3().setFromMatrixColumn(camera.matrix, 1);
+                    const k = cameraDistance * 0.0016;
+                    tgtPan.addScaledVector(right, -dx * k);
+                    tgtPan.addScaledVector(up, dy * k);
+                }
+            });
+            renderer.domElement.addEventListener('contextmenu', (e) => e.preventDefault());
 
             document.addEventListener('touchstart', (e) => {
                 if (e.touches.length === 2) {
+                    goManual();
                     const dx = e.touches[0].clientX - e.touches[1].clientX;
                     const dy = e.touches[0].clientY - e.touches[1].clientY;
                     touchDistance = Math.sqrt(dx * dx + dy * dy);
+                    lastTouchMid = { x: (e.touches[0].clientX + e.touches[1].clientX)/2, y: (e.touches[0].clientY + e.touches[1].clientY)/2 };
+                } else if (e.touches.length === 1) {
+                    goManual();
+                    dragMode = 'orbit';
+                    lastPX = e.touches[0].clientX; lastPY = e.touches[0].clientY;
                 }
             });
 
@@ -209,21 +249,35 @@
                     const dx = e.touches[0].clientX - e.touches[1].clientX;
                     const dy = e.touches[0].clientY - e.touches[1].clientY;
                     const currentDistance = Math.sqrt(dx * dx + dy * dy);
-                    
+                    const mid = { x: (e.touches[0].clientX + e.touches[1].clientX)/2, y: (e.touches[0].clientY + e.touches[1].clientY)/2 };
+
                     if (touchDistance > 0) {
+                        // ピンチでズーム
                         const delta = currentDistance - touchDistance;
-                        autoCam = false;
-                        document.getElementById('autoCamLabel').textContent = 'OFF';
-                        cameraDistance -= delta * cameraDistance * 0.006;
-                        cameraDistance = Math.max(bhFormed ? 190 : 30, Math.min(900, cameraDistance));
+                        tgtDist -= delta * cameraDistance * 0.006;
+                        tgtDist = Math.max(bhFormed ? 190 : 30, Math.min(900, tgtDist));
+                        // 2本指スライドでパン
+                        if (lastTouchMid) {
+                            const mdx = mid.x - lastTouchMid.x, mdy = mid.y - lastTouchMid.y;
+                            const right = new THREE.Vector3().setFromMatrixColumn(camera.matrix, 0);
+                            const up = new THREE.Vector3().setFromMatrixColumn(camera.matrix, 1);
+                            const k = cameraDistance * 0.0016;
+                            tgtPan.addScaledVector(right, -mdx * k);
+                            tgtPan.addScaledVector(up, mdy * k);
+                        }
                     }
-                    
                     touchDistance = currentDistance;
+                    lastTouchMid = mid;
+                } else if (e.touches.length === 1 && dragMode === 'orbit') {
+                    const dx = e.touches[0].clientX - lastPX, dy = e.touches[0].clientY - lastPY;
+                    lastPX = e.touches[0].clientX; lastPY = e.touches[0].clientY;
+                    tgtYaw -= dx * 0.005;
+                    tgtPitch = Math.max(-1.4, Math.min(1.4, tgtPitch - dy * 0.005));
                 }
             }, { passive: true });
 
             document.addEventListener('touchend', () => {
-                touchDistance = 0;
+                touchDistance = 0; lastTouchMid = null; dragMode = null;
             });
 
             animate();
@@ -267,18 +321,25 @@
 
             // ケプラー差動回転（内側ほど速く流れる）
             float spin = uTime * 2.4 / pow(r, 1.5);
+            // 渦状のスパイラル密度波
+            float spiral = ang * 2.0 + log(r) * 4.0 - spin * 2.0;
             vec2 q = vec2(ang * 2.2 + spin * 3.2, r * 1.25);
-            float turb = fbm(q * 2.0) * 0.72 + fbm(q * 6.5) * 0.38;
+            float turb = fbm(q * 2.0) * 0.62 + fbm(q * 6.5) * 0.30 + fbm(q * 15.0) * 0.14;
+            // スパイラルアームの濃淡
+            float arm = 0.5 + 0.5 * sin(spiral);
+            turb *= 0.7 + 0.6 * arm;
 
-            // 温度勾配：内縁は白熱、外縁は暗赤
-            vec3 hot  = vec3(1.00, 0.96, 0.88);
-            vec3 mid  = vec3(1.00, 0.56, 0.14);
-            vec3 cold = vec3(0.42, 0.09, 0.02);
-            vec3 c = mix(hot, mid, smoothstep(0.0, 0.32, t));
-            c = mix(c, cold, smoothstep(0.32, 1.0, t));
+            // 温度勾配：内縁は青白い高温、中間はオレンジ、外縁は暗赤
+            vec3 white = vec3(1.00, 0.98, 0.95);
+            vec3 blue  = vec3(0.75, 0.85, 1.00);
+            vec3 mid   = vec3(1.00, 0.60, 0.20);
+            vec3 cold  = vec3(0.45, 0.10, 0.03);
+            vec3 c = mix(blue, white, smoothstep(0.0, 0.12, t));
+            c = mix(c, mid, smoothstep(0.10, 0.42, t));
+            c = mix(c, cold, smoothstep(0.42, 1.0, t));
 
-            float inten = pow(1.0 - t, 1.7) * 2.4;
-            inten *= 0.5 + 0.95 * turb;
+            float inten = pow(1.0 - t, 1.7) * 2.6;
+            inten *= 0.45 + 1.0 * turb;
             inten *= smoothstep(0.0, 0.05, t) * smoothstep(1.0, 0.72, t);
 
             // 相対論的ドップラービーミング D = 1/(1 - β·n̂)、強度 ∝ D⁴
@@ -286,13 +347,30 @@
             float beta = 0.62 / sqrt(max(r, 1.0) / RIN);
             float D = 1.0 / (1.0 - beta * dot(vel, -rd));
             D = clamp(D, 0.12, 5.5);
-            inten *= pow(D, 3.4);
+            inten *= pow(D, 3.6);
 
             // 青方偏移／赤方偏移
-            c = mix(c, vec3(0.80, 0.90, 1.00), clamp((D - 1.0) * 0.30, 0.0, 0.45));
-            c = mix(c, vec3(0.75, 0.16, 0.05), clamp((1.0 - D) * 0.85, 0.0, 0.6));
+            c = mix(c, vec3(0.75, 0.88, 1.00), clamp((D - 1.0) * 0.35, 0.0, 0.5));
+            c = mix(c, vec3(0.80, 0.16, 0.04), clamp((1.0 - D) * 0.85, 0.0, 0.65));
 
             return c * inten;
+        }
+
+        // 相対論的ジェット（Y軸方向の双極。円錐状のプラズマをボリュームで）
+        vec3 jetColor(vec3 pos){
+            float ax = abs(pos.y);
+            float rad = length(pos.xz);
+            float coneR = 0.4 + ax * 0.13;
+            if (ax < 1.0 || ax > 24.0 || rad > coneR) return vec3(0.0);
+
+            float core = 1.0 - smoothstep(0.0, coneR, rad);
+            float along = 1.0 - smoothstep(1.0, 24.0, ax);
+            float ang = atan(pos.z, pos.x);
+            float helix = 0.5 + 0.5 * sin(ang * 6.0 - ax * 1.2 + uTime * 8.0);
+            float streak = pow(0.5 + 0.5 * sin(ax * 3.0 - uTime * 14.0), 2.0);
+            float inten = core * along * (0.4 + 0.6 * helix) * (0.5 + 0.7 * streak);
+            vec3 c = mix(vec3(0.75, 0.88, 1.0), vec3(0.6, 0.4, 1.0), smoothstep(0.0, 24.0, ax));
+            return c * inten * 2.2;
         }
 
         // 背景の星（セル中心からの距離で丸く描く）
@@ -368,8 +446,11 @@
                 col += starColor(outDir) * magnify * (0.55 + 0.45 * (1.0 - uForm));
 
                 // 臨界衝突径数の直上を掠める光 → 光子リングの細い光輪
-                float photon = smoothstep(0.55, 0.95, bend) * smoothstep(1.85, 1.35, bend);
-                col += vec3(1.0, 0.93, 0.80) * photon * 0.30 * uForm;
+                float photon = smoothstep(0.55, 0.95, bend) * smoothstep(1.90, 1.35, bend);
+                col += vec3(1.0, 0.95, 0.85) * photon * 0.55 * uForm;
+                // さらに内側の二次光子リング（何周も回った光）
+                float photon2 = smoothstep(1.4, 1.75, bend) * smoothstep(2.0, 1.8, bend);
+                col += vec3(1.0, 0.9, 0.75) * photon2 * 0.9 * uForm;
             }
 
             col = col / (1.0 + col);          // トーンマップ
@@ -457,9 +538,9 @@
             const height = new Float32Array(N);
 
             for (let i = 0; i < N; i++) {
-                radius[i] = ROUT_W * (0.75 + Math.random() * 0.95);
+                radius[i] = ROUT_W * (0.9 + Math.random() * 0.8);
                 angle[i] = Math.random() * Math.PI * 2;
-                height[i] = (Math.random() - 0.5) * 55;
+                height[i] = (Math.random() - 0.5) * 22;   // 薄い円盤
             }
 
             const geo = new THREE.BufferGeometry();
@@ -474,15 +555,17 @@
                 opacity: 0,
                 sizeAttenuation: true,
                 depthWrite: false,
+                depthTest: true,
                 blending: THREE.AdditiveBlending,
                 toneMapped: false
             });
 
             infall = new THREE.Points(geo, mat);
+            infall.renderOrder = 4;
             infall.position.copy(pos);
             scene.add(infall);
             infallData = { N, radius, angle, height };
-            bhParts.push({ mesh: infall, delay: 0.9, dur: 1.8, opacity: 0.85 });
+            bhParts.push({ mesh: infall, delay: 0.9, dur: 1.8, opacity: 0.5 });
         }
 
         function updateInfallGas(dt) {
@@ -526,6 +609,53 @@
 
             infall.geometry.attributes.position.needsUpdate = true;
             infall.geometry.attributes.color.needsUpdate = true;
+        }
+
+        // ============ 合体前の重力波（インスパイラル） ============
+        let inspiralRings = [];
+        function createInspiralRings() {
+            for (let i = 0; i < 5; i++) {
+                const geo = new THREE.RingGeometry(0.6, 1.0, 128, 1);
+                const mat = new THREE.ShaderMaterial({
+                    uniforms: { uAge: { value: 0 }, uOpacity: { value: 0 } },
+                    vertexShader: `varying vec2 vP; void main(){ vP = position.xy; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }`,
+                    fragmentShader: `
+                        uniform float uAge, uOpacity; varying vec2 vP;
+                        void main(){
+                            float r = length(vP);
+                            float t = clamp((r - 0.6) / 0.4, 0.0, 1.0);
+                            float ang = atan(vP.y, vP.x);
+                            float quad = 0.5 + 0.5 * cos(ang * 2.0 - uAge * 6.0 + t * 20.0);
+                            float band = smoothstep(0.0, 0.2, t) * smoothstep(1.0, 0.6, t);
+                            float a = uOpacity * band * (0.2 + 0.8 * quad);
+                            vec3 c = mix(vec3(0.3,0.55,1.0), vec3(0.7,0.85,1.0), quad);
+                            gl_FragColor = vec4(c, a);
+                        }`,
+                    transparent: true, depthWrite: false, side: THREE.DoubleSide, blending: THREE.AdditiveBlending
+                });
+                const ring = new THREE.Mesh(geo, mat);
+                ring.rotation.x = -Math.PI / 2;
+                ring.visible = false;
+                scene.add(ring);
+                inspiralRings.push({ mesh: ring, phase: i / 5 });
+            }
+        }
+
+        function updateInspiralRings(dt) {
+            if (blackHole) { inspiralRings.forEach(r => r.mesh.visible = false); return; }
+            const dist = starDist;
+            const intensity = dist < 90 ? Math.pow((90 - dist) / 90, 1.5) : 0;
+            inspiralRings.forEach((r) => {
+                r.phase += dt * speed * (0.15 + 0.5 * intensity);
+                if (r.phase > 1) r.phase -= 1;
+                const sc = 20 + r.phase * 260;
+                r.mesh.position.copy(sceneCenter);
+                r.mesh.scale.set(sc, sc, 1);
+                r.mesh.material.uniforms.uAge.value = time * (1 + intensity);
+                const fade = Math.sin(r.phase * Math.PI);
+                r.mesh.material.uniforms.uOpacity.value = fade * intensity * 0.6;
+                r.mesh.visible = intensity > 0.02;
+            });
         }
 
         // 根元が最も眩しく、先端に向かって減衰、輪郭はソフト
@@ -608,6 +738,7 @@
                     }`,
                 transparent: true,
                 depthWrite: false,
+                depthTest: true,
                 side: THREE.DoubleSide,
                 blending: THREE.AdditiveBlending
             });
@@ -800,7 +931,7 @@
                 new THREE.MeshBasicMaterial({ colorWrite: false, depthWrite: true, depthTest: true })
             );
             occluder.position.copy(pos);
-            occluder.renderOrder = -1;
+            occluder.renderOrder = -100;
             occluder.scale.setScalar(0.03);
             scene.add(occluder);
 
@@ -828,6 +959,7 @@
                     bhParts.push({ mesh: jet, delay: 1.6, dur: 1.0, opacity: i === 0 ? 0.85 : 0.35 });
                 }
                 group.scale.y = 0.01;
+                group.renderOrder = 10;
                 scene.add(group);
                 bhParts.push({ mesh: group, delay: 1.6, dur: 1.5, scaleY: 1 });
             }
@@ -858,9 +990,10 @@
                 if (f >= 1) { scene.remove(flash); flash = null; }
             }
 
-            // シェーダーの horizon = mix(0.03, 1.0, uForm) と厳密に一致させる
+            // シェーダーの uForm と厳密に一致（horizon の成長と同期）
             if (occluder) {
                 const form = Math.min(Math.max((bhTime - 0.15) / 2.2, 0), 1);
+                // horizon = mix(0.03, 1.0, form) と同じ係数で膨張させる
                 occluder.scale.setScalar(0.03 + form * (1.0 - 0.03));
             }
 
@@ -874,8 +1007,10 @@
                 if (p.scaleY !== undefined) p.mesh.scale.y = 0.01 + e * (p.scaleY - 0.01);
                 if (p.opacity !== undefined) {
                     const m = p.mesh.material;
-                    if (m.uniforms && m.uniforms.uOpacity) m.uniforms.uOpacity.value = e * p.opacity;
-                    else m.opacity = e * p.opacity;
+                    // fade: 立ち上がってから消える（sin山）。通常: 立ち上がって維持
+                    const o = p.fade ? Math.sin(t * Math.PI) * p.opacity : e * p.opacity;
+                    if (m.uniforms && m.uniforms.uOpacity) m.uniforms.uOpacity.value = o;
+                    else m.opacity = o;
                 }
             });
 
@@ -885,49 +1020,54 @@
         }
 
         function createExplosion(pos) {
-            for (let wave = 0; wave < 3; wave++) {
+            // 合体直後に外へ弾ける放出。円盤面に沿って扁平にし、
+            // 短時間で消えることで事象の地平面を覆い隠さないようにする
+            for (let wave = 0; wave < 2; wave++) {
                 const pGeo = new THREE.BufferGeometry();
-                const count = 4000;
+                const count = 3000;
                 const positions = new Float32Array(count * 3);
                 const colors = new Float32Array(count * 3);
 
                 for (let i = 0; i < count; i++) {
-                    const r = 110 + wave * 35 + Math.random() * 25;
+                    const r = 130 + wave * 40 + Math.random() * 30;
                     const theta = Math.random() * Math.PI * 2;
-                    const phi = Math.acos(2 * Math.random() - 1);
+                    // Y方向を強く潰して円盤面に沿わせる（±0.25の薄い層）
+                    const phi = Math.acos((Math.random() * 2 - 1) * 0.25);
 
                     positions[i * 3] = Math.sin(phi) * Math.cos(theta) * r;
-                    positions[i * 3 + 1] = Math.cos(phi) * r;
+                    positions[i * 3 + 1] = Math.cos(phi) * r * 0.35;
                     positions[i * 3 + 2] = Math.sin(phi) * Math.sin(theta) * r;
 
                     const c = Math.random();
-                    if (c < 0.15)      { colors[i*3]=1; colors[i*3+1]=0.05; colors[i*3+2]=0; }
-                    else if (c < 0.35) { colors[i*3]=1; colors[i*3+1]=0.25; colors[i*3+2]=0; }
-                    else if (c < 0.55) { colors[i*3]=1; colors[i*3+1]=0.55; colors[i*3+2]=0; }
-                    else if (c < 0.75) { colors[i*3]=1; colors[i*3+1]=0.85; colors[i*3+2]=0.1; }
-                    else               { colors[i*3]=1; colors[i*3+1]=1;    colors[i*3+2]=0.4; }
+                    if (c < 0.2)       { colors[i*3]=1; colors[i*3+1]=0.15; colors[i*3+2]=0; }
+                    else if (c < 0.5)  { colors[i*3]=1; colors[i*3+1]=0.45; colors[i*3+2]=0; }
+                    else if (c < 0.8)  { colors[i*3]=1; colors[i*3+1]=0.75; colors[i*3+2]=0.1; }
+                    else               { colors[i*3]=1; colors[i*3+1]=0.95; colors[i*3+2]=0.4; }
                 }
 
                 pGeo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
                 pGeo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
 
                 const pMat = new THREE.PointsMaterial({
-                    size: 3.2,
+                    size: 2.4,
                     vertexColors: true,
                     map: spriteTex,
                     transparent: true,
                     opacity: 0,
                     sizeAttenuation: true,
                     depthWrite: false,
+                    depthTest: true,
                     blending: THREE.AdditiveBlending,
                     toneMapped: false
                 });
 
                 const particles = new THREE.Points(pGeo, pMat);
                 particles.position.copy(pos);
-                particles.scale.setScalar(0.05);
+                particles.scale.setScalar(0.1);
+                particles.renderOrder = 5;
                 scene.add(particles);
-                bhParts.push({ mesh: particles, delay: 0.1 + wave * 0.12, dur: 2.2, scale: 1, opacity: 0.5 - wave * 0.1 });
+                // 短時間で膨張しながら消える（キロノヴァの一瞬の閃光）
+                bhParts.push({ mesh: particles, delay: 0.05 + wave * 0.1, dur: 1.2, scale: 1.6, opacity: 0.45 - wave * 0.12, fade: true });
             }
         }
 
@@ -935,10 +1075,11 @@
             if (paused) return;
 
             time += 0.016 * speed;
-            phase += 0.016 * speed * 0.5;
 
             const r = Math.max(6, 110 - time * 0.8);
-            const v = Math.sqrt(0.15 / Math.max(r, 0.1)) * 15;
+            // 接近するほど公転が加速（角速度 ω ∝ r^-1.5、上限つき）
+            const omega = Math.min(3.0, 0.5 * Math.pow(110 / r, 1.5));
+            phase += 0.016 * speed * omega;
 
             const x1 = Math.cos(phase) * r;
             const z1 = Math.sin(phase) * r;
@@ -974,7 +1115,8 @@
             }
 
             if (dist < 16 && !blackHole) {
-                const mergePos = new THREE.Vector3().addVectors(star1.position, star2.position).multiplyScalar(0.5);
+                // ブラックホールは原点に固定（レンズ円盤の中心と一致させる）
+                const mergePos = new THREE.Vector3(0, 0, 0);
                 createBlackHole(mergePos);
                 scene.remove(star1);
                 scene.remove(star2);
@@ -1018,16 +1160,44 @@
             });
         }
 
+        function goManual() {
+            if (autoCam) {
+                // 現在のカメラ状態を手動の初期値に
+                tgtYaw = camYaw = phase * 0.15;
+                tgtPitch = camPitch;
+                tgtDist = cameraDistance;
+                tgtPan.copy(panOffset);
+            }
+            autoCam = false;
+            document.getElementById('autoCamLabel').textContent = 'OFF';
+        }
+
         function updateCamera() {
             // ブラックホール形成後も必ずカメラを更新（ズームを効かせる）
             if (!blackHole && star1 && star2) {
                 sceneCenter.addVectors(star1.position, star2.position).multiplyScalar(0.5);
             }
 
-            const angle = phase * 0.15;
-            camera.position.x = sceneCenter.x + Math.cos(angle) * cameraDistance;
-            camera.position.z = sceneCenter.z + Math.sin(angle) * cameraDistance;
-            camera.position.y = sceneCenter.y + Math.max(30, cameraDistance * 0.5);
+            const focus = sceneCenter.clone().add(panOffset);
+
+            let angle, py;
+            if (autoCam) {
+                angle = phase * 0.15;
+                py = Math.max(30, cameraDistance * 0.5);
+            } else {
+                // 目標値へ滑らかに追従（慣性感のある操作）
+                camYaw += (tgtYaw - camYaw) * 0.12;
+                camPitch += (tgtPitch - camPitch) * 0.12;
+                cameraDistance += (tgtDist - cameraDistance) * 0.12;
+                panOffset.lerp(tgtPan, 0.12);
+                angle = camYaw;
+                py = Math.sin(camPitch) * cameraDistance;
+            }
+            const horiz = autoCam ? cameraDistance : Math.cos(camPitch) * cameraDistance;
+
+            camera.position.x = focus.x + Math.cos(angle) * horiz;
+            camera.position.z = focus.z + Math.sin(angle) * horiz;
+            camera.position.y = focus.y + py;
 
             // 重力波によるカメラシェイク（距離に比例させて見た目の振れ幅を一定に）
             const s = (shakeAmp * 0.012 + shakeImpulse * 0.055) * cameraDistance;
@@ -1038,7 +1208,7 @@
                 camera.position.z += (Math.sin(t * 53.3) + 0.6 * Math.sin(t * 97.7)) * s;
             }
 
-            camera.lookAt(sceneCenter);
+            camera.lookAt(focus);
         }
 
         function animate() {
@@ -1049,6 +1219,7 @@
             lastFrameTime = nowMs;
 
             updatePhysics();
+            if (!paused) updateInspiralRings(dt);
             if (!paused) updateBlackHoleFormation(dt);
             if (!paused) updateCinematicCamera(dt);
             updateCamera();
@@ -1096,6 +1267,8 @@
             if (infall) { scene.remove(infall); infall = null; infallData = null; }
             starDist = 999;
             autoCam = true;
+            panOffset.set(0, 0, 0);
+            camYaw = 0; camPitch = 0.5;
             document.getElementById('autoCamLabel').textContent = 'ON';
 
             // 爆発の殻など残骸を掃除
@@ -1135,8 +1308,9 @@
         function togglePanel() {
             const panel = document.getElementById('panel');
             const btn = document.getElementById('toggleBtn');
-            panel.classList.toggle('hidden');
-            btn.classList.toggle('hidden');
+            const nowHidden = panel.classList.toggle('hidden');
+            // パネルが隠れたらボタンを出す、開いたらボタンを隠す
+            btn.classList.toggle('hidden', !nowHidden);
         }
 
         function onWindowResize() {
